@@ -1,5 +1,8 @@
 library(dequer)
 
+# Christchurch water as at 2018-10-28 as per https://www.ccc.govt.nz/services/water-and-drainage/water-supply/quality-and-monitoring/water-quality-and-monitoring/
+christchurchWater <- c(water=1000, hcl=0, naoh=0, nacl=0, h2co3=1, hco3=52) # (litres, grams, grams, grams)
+
 tankContents <- c(water=10000, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)
 bleedRate <- 1.5 # litres / second
 recirculationRate = 124000/60/60 # litres / second 
@@ -27,6 +30,7 @@ bleed <- function(liquidContents, recircRate, timeDelta) {
 
 # Returns the recirculation contents to the tank
 returnRecirc <- function(tankContents, recircContents) {
+  stopifnot(length(tankContents) == length(recircContents))
   tankContents <- tankContents + recircContents
   return(tankContents)
 }
@@ -137,26 +141,50 @@ test_makeupWater <- function() {
 measurePh <- function(liquidContents) {
   hcl <- unname(liquidContents["hcl"])
   naoh <- unname(liquidContents["naoh"])
+  h2co3 <- unname(liquidContents["h2co3"])  # weak acid
+  hco3 <- unname(liquidContents["hco3"])    # conjugate base
   water <- unname(liquidContents["water"])
+  
+  if (is.na(hcl)) hcl <- 0
+  if (is.na(naoh)) naoh <- 0
+  if (is.na(h2co3)) h2co3 <- 0
+  if (is.na(hco3)) hco3 <- 0
+  if (water<=0) {
+    return(7)
+  }
+
+  gramsPerMolHcl <- 36.46
+  gramsPerMolNaoh <- 39.99
+  gramsPerMolH2co3 <- 62.02
+  gramsPerMolHco3 <- 61.02
+  
+  molHcl <- hcl / gramsPerMolHcl
+  molNaoh <- naoh / gramsPerMolNaoh
+  molH2co3 <- h2co3 / gramsPerMolH2co3
+  molHco3 <- hco3 / gramsPerMolHco3  
   
   # Check that neuralisation has already occurred
   stopifnot(hcl==0 | naoh==0)
   
+  if (h2co3!=0 & hco3!=0) {
+    # The buffer isn't broken
+    pKa <- 6.1 # for H2CO3
+    molH2co3PerLitre <- molH2co3 / water
+    molHco3PerLitre <- molHco3 / water
+    ph <- pKa + log10(molHco3PerLitre / molH2co3PerLitre)
+    return(ph)
+  }
+  
+  # The bufer's broken; just ignore the weak acid and its conjugate base
   if (hcl > 0) {
     # pH calculation if there is HCl
-    gramsPerMol <- 36
-    molOfHcl <- hcl / gramsPerMol
-    volume <- water # Assumes that chemical additions do not change volume
-    molPerLitre <- molOfHcl / volume
-    ph <- -log10(molPerLitre)
+    molHclPerLitre <- molHcl / water
+    ph <- -log10(molHclPerLitre)
     if (ph>7) ph <- 7 # The amount of HCl is so small this equation is no longer correct
   } else if (naoh > 0) {
     # pH calculation if there is NaOH
-    gramsPerMol <- 40
-    molOfNaoh <- naoh / gramsPerMol
-    volume <- water # Assumes that chemical additions do not change volume
-    molPerLitre <- molOfNaoh / volume
-    poh <- -log10(molPerLitre)
+    molNaohPerLitre <- molNaoh / water
+    poh <- -log10(molNaohPerLitre)
     ph <- 14 - poh
     if (ph<7) ph <- 7 # The amount of NaOH is so small this equation is no longer correct
   } else {
@@ -178,6 +206,14 @@ test_measurePh <- function() {
   tankContents <- c(water=10000, hcl=1000, naoh=0) # (litres, grams, grams)
   result <- measurePh(tankContents)
   stopifnot(abs(result - 2.56) < 0.01)
+  
+  tankContents <- c(water=10000, hcl=1, naoh=0, nacl=0, h2co3=0, hco3=0) # (litres, grams, grams)
+  result <- measurePh(tankContents)
+  stopifnot(abs(result - 5.56) < 0.01)
+  
+  tankContents <- c(water=1000, hcl=0, naoh=0, nacl=0, h2co3=0.5, hco3=52) # (litres, grams, grams)
+  result <- measurePh(tankContents)
+  stopifnot(abs(result - 8.12) < 0.01)
 }
 
 
@@ -189,6 +225,7 @@ measurePhWithRollingAverage <- function(liquidContents) {
   total <- attr(measurePhWithRollingAverage, "total")
   
   measuredPh <- measurePh(liquidContents)
+  if (is.na(measuredPh)) return(NA)
   
   # Add noise
   measuredPh <- rnorm(1, mean=measuredPh, sd=abs(0.1*measuredPh))
@@ -208,7 +245,7 @@ measurePhWithRollingAverage <- function(liquidContents) {
 
   stopifnot(count>0)  
   result <- total / count
-  stopifnot(result > 0 & result < 14)
+  stopifnot(result >= 0 & result <= 14)
   result
 }
 
@@ -356,14 +393,27 @@ chemicalReaction <- function(liquidContents) {
   hcl <- unname(liquidContents["hcl"])
   naoh <- unname(liquidContents["naoh"])
   nacl <- unname(liquidContents["nacl"])
+  h2co3 <- unname(liquidContents["h2co3"])  # weak acid
+  hco3 <- unname(liquidContents["hco3"])    # conjugate base
+  
+  if (is.na(hcl)) hcl <- 0
+  if (is.na(naoh)) naoh <- 0
+  if (is.na(nacl)) nacl <- 0
+  if (is.na(h2co3)) h2co3 <- 0
+  if (is.na(hco3)) hco3 <- 0
   
   gramsPerMolHcl <- 36.46
   gramsPerMolNaoh <- 39.99
   gramsPerMolNacl <- 58.44
+  gramsPerMolH2co3 <- 62.02
+  gramsPerMolHco3 <- 61.02
   
   molHcl <- hcl / gramsPerMolHcl
   molNaoh <- naoh / gramsPerMolNaoh
+  molH2co3 <- h2co3 / gramsPerMolH2co3
+  molHco3 <- hco3 / gramsPerMolHco3
   
+  # The HCl and NaOH neutralise each other
   if (molHcl > molNaoh) {
     molNacl <- molNaoh
     molHcl <- molHcl - molNaoh
@@ -374,24 +424,99 @@ chemicalReaction <- function(liquidContents) {
     molHcl <- 0
   }
   
+  # Remaining HCl or NaOH will have (first) reacted with the buffer
+  if (molHcl > 0) {
+    # HCl will react with conjugate base to form weak acid
+    # HCl + HCO3- -> H2CO3 + Cl-
+    if (molHco3 > molHcl) {
+      # There's more buffer than strong acid
+      molH2co3 <- molH2co3 + molHcl
+      molHco3 <- molHco3 - molHcl
+      molHcl <- 0
+    } else {
+      # There is more strong acid than buffer
+      molH2co3 <- molH2co3 + molHco3
+      molHcl <- molHcl - molHco3
+      molHco3 <- 0
+    }
+  } else {
+    # NaOH will react with weak acid to form conjugate base
+    # NaOH + H2CO3 -> HCO3- + Na+ + H2O
+    if (molH2co3 > molNaoh) {
+      # There is more buffer than strong base
+      molHco3 <- molHco3 + molNaoh
+      molH2co3 <- molH2co3 - molNaoh
+      molNaoh <- 0
+    } else {
+      # There is more strong base than buffer
+      molHco3 <- molHco3 + molH2co3
+      molNaoh <- molNaoh - molH2co3
+      molH2co3 <- 0
+    }
+  }
+  
   # Convert back to grams
   hcl <- molHcl * gramsPerMolHcl
   naoh <- molNaoh * gramsPerMolNaoh
   nacl <- nacl + molNacl * gramsPerMolNacl
+  h2co3 <- molH2co3 * gramsPerMolH2co3
+  hco3 <- molHco3 * gramsPerMolHco3
   
   liquidContents["hcl"] <- hcl
   liquidContents["naoh"] <- naoh
   liquidContents["nacl"] <- nacl
+  liquidContents["h2co3"] <- h2co3
+  liquidContents["hco3"] <- hco3
   
   return(liquidContents)
 }
 
 test_chemicalReaction <- function() {
-  start <- c(water=10000, hcl=1000, naoh=1000, nacl=0) # (litres, grams, grams, grams)
+  # Test that NaOH and HCl neutralise
+  start <- c(water=10000, hcl=1000, naoh=1000) # (litres, grams, grams)
   result <- chemicalReaction(start)
   stopifnot( abs(result["hcl"] - 88.2) < 0.1 )
   stopifnot( abs(result["naoh"] - 0) < 0.1 )
   stopifnot( abs(result["nacl"] - 1461.4) < 0.1 )
+  stopifnot( abs(result["h2co3"] - 0) < 0.1 )
+  stopifnot( abs(result["hco3"] - 0) < 0.1 )
+
+  # Test HCl addition where buffer isn't broken
+  start <- c(water=10000, hcl=1, naoh=0, nacl=0, h2co3=100, hco3=100) # (litres, grams, grams)
+  result <- chemicalReaction(start)
+  stopifnot( abs(result["hcl"] - 0) < 0.1 )
+  stopifnot( abs(result["naoh"] - 0) < 0.1 )
+  stopifnot( abs(result["nacl"] - 0) < 0.1 )
+  stopifnot( abs(result["h2co3"] - 101.7) < 0.1 )
+  stopifnot( abs(result["hco3"] - 98.3) < 0.1 )
+
+  # Test HCl addition where buffer breaks
+  start <- c(water=10000, hcl=100, naoh=0, nacl=0, h2co3=10, hco3=10) # (litres, grams, grams)
+  result <- chemicalReaction(start)
+  stopifnot( abs(result["hcl"] - 94.0) < 0.1 )
+  stopifnot( abs(result["naoh"] - 0) < 0.1 )
+  stopifnot( abs(result["nacl"] - 0) < 0.1 )
+  stopifnot( abs(result["h2co3"] - 20.2) < 0.1 )
+  stopifnot( abs(result["hco3"] - 0) < 0.1 )
+  
+  # Test NaOH addition where buffer isn't broken
+  start <- c(water=10000, hcl=0, naoh=1, nacl=0, h2co3=100, hco3=100) # (litres, grams, grams)
+  result <- chemicalReaction(start)
+  return(result)
+  stopifnot( abs(result["hcl"] - 0) < 0.1 )
+  stopifnot( abs(result["naoh"] - 0) < 0.1 )
+  stopifnot( abs(result["nacl"] - 0) < 0.1 )
+  stopifnot( abs(result["h2co3"] - 98.4) < 0.1 )
+  stopifnot( abs(result["hco3"] - 101.5) < 0.1 )
+  
+  # Test NaOH addition where buffer breaks
+  start <- c(water=10000, hcl=0, naoh=100, nacl=0, h2co3=10, hco3=10) # (litres, grams, grams)
+  result <- chemicalReaction(start)
+  stopifnot( abs(result["hcl"] - 0) < 0.1 )
+  stopifnot( abs(result["naoh"] - 93.6) < 0.1 )
+  stopifnot( abs(result["nacl"] - 0) < 0.1 )
+  stopifnot( abs(result["h2co3"] - 0) < 0.1 )
+  stopifnot( abs(result["hco3"] - 19.8) < 0.1 )
 }
 
 proportionalPumpControl <- function(pv, sp, p) {
@@ -417,12 +542,12 @@ phSetpoint <- 8
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
   if (time>60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
+    tankContents <- doseAcidAtFixedRate(tankContents, 100, 45*60, timeDelta)
   }
   
   # Add makup water
-  tankContents <- makeupWater(tankContents, makeupWaterRate, 
-                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
+#  tankContents <- makeupWater(tankContents, makeupWaterRate, 
+#                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
   
   # Recirc the water
   recircResult <- recirc(tankContents, recircRate, timeDelta)
@@ -430,13 +555,14 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   recircContents <- recircResult$recircContents
   
   # Dose caustic
-  previousPh <- attr(update, "ph.recirc")
-  if (is.null(previousPh)) previousPh <- 7
-  pumpPercentage <- proportionalPumpControl(previousPh,
-                                            phSetpoint,
-                                            2)
+#  previousPh <- attr(update, "ph.recirc")
+#  if (is.null(previousPh)) previousPh <- 7
+  pumpPercentage <- NA
+#  pumpPercentage <- proportionalPumpControl(previousPh,
+#                                            phSetpoint,
+#                                            2)
   #recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
-  recircContents <- pumpCausticSolutionWithRollingAverage(recircContents, pumpPercentage, maxPumpRate, timeDelta)
+#  recircContents <- pumpCausticSolutionWithRollingAverage(recircContents, pumpPercentage, maxPumpRate, timeDelta)
   
   # Delay the contents of the pipe
   recircContents <- delay(recircContents)
@@ -450,7 +576,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   attr(update, "ph.recirc") <<- phRecirc
   
   # Bleed some of the recirc water
-  recircContents <- bleed(recircContents, recircRate, timeDelta)
+#  recircContents <- bleed(recircContents, recircRate, timeDelta)
 
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
@@ -495,7 +621,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=70*60, timeDelta=1)
+results <- run(christchurchWater*10, recirculationRate, duration=70*60, timeDelta=1)
 
 plot(results$time/60, results$water, type="l",
      main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
