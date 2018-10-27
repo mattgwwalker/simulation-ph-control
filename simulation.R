@@ -1,3 +1,5 @@
+library(dequer)
+
 tankContents <- c(water=10000, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)
 bleedRate <- 1.5 # litres / second
 recirculationRate = 124000/60/60 # litres / second 
@@ -15,7 +17,9 @@ recirc <- function(tankContents, recircRate, timeDelta) {
 # Returns the liquid contents after bleeding
 bleed <- function(liquidContents, recircRate, timeDelta) {
   bleedTotalVolume <- bleedRate * timeDelta
-  bleedVolumes <- bleedTotalVolume/liquidContents["water"] * liquidContents 
+  water <- liquidContents["water"]
+  if (water == 0) return(liquidContents)
+  bleedVolumes <- bleedTotalVolume/water * liquidContents 
   liquidContents <- liquidContents - bleedVolumes
   return(liquidContents)
 }
@@ -25,6 +29,40 @@ bleed <- function(liquidContents, recircRate, timeDelta) {
 returnRecirc <- function(tankContents, recircContents) {
   tankContents <- tankContents + recircContents
   return(tankContents)
+}
+
+
+# Simulate the delay of liquid as it does down the pipe
+delay <- function(liquidContents) {
+  q <- attr(delay, "queue")
+  pushback(q, liquidContents)
+  pop(q)
+}
+
+init_delay <- function(delayTime, timeDelta) {
+  q <- queue()
+  
+  numPlaces <- delayTime / timeDelta
+
+  emptyContents <- c(water=0, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)  
+  for (i in (1:numPlaces)) {
+    pushback(q, emptyContents)
+  }
+  
+  attr(delay, "queue") <<- q
+}
+
+test_delay <- function() {
+  init_delay(2,1)
+  tankContents <- c(water=10000, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)
+  emptyContents <- c(water=0, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)  
+  
+  result <- delay(tankContents)
+  stopifnot(result == emptyContents)  
+  result <- delay(tankContents)
+  stopifnot(result == emptyContents)  
+  result <- delay(tankContents)
+  stopifnot(result == tankContents)  
 }
 
 
@@ -321,33 +359,44 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   if (time>60) {
     tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
   }
+  
   # Add makup water
-  tankContents <- makeupWater(tankContents, makeupWaterRate, makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
+  tankContents <- makeupWater(tankContents, makeupWaterRate, 
+                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
+  
   # Recirc the water
   recircResult <- recirc(tankContents, recircRate, timeDelta)
   tankContents <- recircResult$tankContents
   recircContents <- recircResult$recircContents
+  
   # Dose caustic
   phSetpoint <- 8
   previousPh <- attr(update, "ph.recirc")
   if (is.null(previousPh)) previousPh <- 7
   pumpPercentage <- proportionalPumpControl(previousPh,
                                             phSetpoint,
-                                            10)
+                                            3)
   recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
+
+  # Delay the contents of the pipe
+  recircContents <- delay(recircContents)
+  
   # Measure the pH in the recirc line
   recircContents <- chemicalReaction(recircContents)
-  #measuredPhRecirc <- measurePh(recircContents)
   phRecirc <- measurePhWithRollingAverage(recircContents)
   linearPhRecirc <- linearisePh(phRecirc)
   names(phRecirc) <- "ph.recirc"
   names(linearPhRecirc) <- "linear_ph.recirc"
   attr(update, "ph.recirc") <<- phRecirc
+  
   # Bleed some of the recirc water
   recircContents <- bleed(recircContents, recircRate, timeDelta)
+
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
+  
   # Measure the pH in the tank
+
   tankContents <- chemicalReaction(tankContents)
   phTank <- measurePh(tankContents)
   names(phTank) <- "ph.tank"
@@ -369,6 +418,7 @@ test_update <- function() {
 # Simulates the system through multiple time steps
 run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   init_update()
+  init_delay(2.5, timeDelta)
   init_makeupWater()
   init_doseAcidAtFixedRate()
   init_measurePhWithRollingAverage(10)
@@ -385,14 +435,21 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=30*60, timeDelta=1)
+results <- run(tankContents, recirculationRate, duration=50*60, timeDelta=0.5)
 
 plot(results$time/60, results$water, type="l",
      main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
 plot(results$time/60, results$ph.tank, type="l",
-     main="pH in Tank", xlab="Time (mins)", ylab="pH")
+     main="pH in Tank", xlab="Time (mins)", ylab="pH",
+     ylim=c(0,14))
+
 plot(results$time/60, results$ph.recirc, type="l",
-     main="pH in Recirc Line", xlab="Time (mins)", ylab="pH")
+     main="pH in Recirc Line", xlab="Time (mins)", ylab="pH",
+     ylim=c(0,14))
+par(new = T)
+plot(results$time/60, results$pump.output, type="l", col="red",
+     ylim=c(0,100), axes=F, xlab=NA, ylab=NA)
+
 #plot(results$time/60, results$linear_ph.recirc, type="l")
 
 
