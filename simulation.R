@@ -6,7 +6,7 @@ recirculationRate = 124000/60/60 # litres / second
 # as the pumping contents
 recirc <- function(tankContents, recircRate, timeDelta) {
   recircTotalVolume <- recirculationRate * timeDelta
-  recircContents <- recircTotalVolume/sum(tankContents) * tankContents
+  recircContents <- recircTotalVolume/tankContents["water"] * tankContents
   tankContents <- tankContents - recircContents
   return(list(tankContents=tankContents, recircContents=recircContents))
 }
@@ -15,7 +15,7 @@ recirc <- function(tankContents, recircRate, timeDelta) {
 # Returns the liquid contents after bleeding
 bleed <- function(liquidContents, recircRate, timeDelta) {
   bleedTotalVolume <- bleedRate * timeDelta
-  bleedVolumes <- bleedTotalVolume/sum(liquidContents) * liquidContents 
+  bleedVolumes <- bleedTotalVolume/liquidContents["water"] * liquidContents 
   liquidContents <- liquidContents - bleedVolumes
   return(liquidContents)
 }
@@ -124,18 +124,88 @@ measurePh <- function(liquidContents) {
     # pH if there is no HCl nor NaOH
     ph <- 7
   }
+
+  stopifnot(ph > 0 & ph < 14)
   
-  # Linearised pH
-  linear_ph <- 10^(8-ph)
-  
-  return(c(ph=ph, linear_ph=linear_ph))
+  ph
 }
+
+linearisePh <- function(ph) {
+  10^(8-ph)
+}
+
 
 test_measurePh <- function() {
   tankContents <- c(water=10000, hcl=1000, naoh=0) # (litres, grams, grams)
   result <- measurePh(tankContents)
   stopifnot(abs(result - 2.56) < 0.01)
 }
+
+
+# Simulate a slower-to-respond pH probe
+measurePhWithRollingAverage <- function(liquidContents) {
+  previousValues <- attr(measurePhWithRollingAverage, "previousValues")
+  numOfSamples <- length(previousValues)
+  count <- attr(measurePhWithRollingAverage, "count")
+  index <- attr(measurePhWithRollingAverage, "index")
+  total <- attr(measurePhWithRollingAverage, "total")
+  
+  measuredPh <- measurePh(liquidContents)
+
+  total <- total + measuredPh
+  if (count!=0) {
+    total <- total - previousValues[index]
+  }
+  previousValues[index] <- measuredPh
+  index <- index + 1
+  if (index > numOfSamples) index <- 1
+  count <- count + 1
+  if (count > numOfSamples) count <- numOfSamples
+  
+  attr(measurePhWithRollingAverage, "previousValues") <<- previousValues
+  attr(measurePhWithRollingAverage, "count") <<- count
+  attr(measurePhWithRollingAverage, "index") <<- index
+  attr(measurePhWithRollingAverage, "total") <<- total
+  
+  result <- total / count
+  stopifnot(result > 0 & result < 14)
+  result
+}
+
+init_measurePhWithRollingAverage <- function(numOfSamples) {
+  attr(measurePhWithRollingAverage, "previousValues") <<- numeric(numOfSamples)
+  attr(measurePhWithRollingAverage, "count") <<- 0
+  attr(measurePhWithRollingAverage, "index") <<- 0
+  attr(measurePhWithRollingAverage, "total") <<- 0
+}
+
+
+test_measurePhWithRollingAverage <- function() {
+  init_measurePhWithRollingAverage(3)
+  phs <- NULL
+  tankContents <- c(water=10000, hcl=100, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  tankContents <- c(water=10000, hcl=10, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  tankContents <- c(water=10000, hcl=10, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  # errors:
+  tankContents <- c(water=10000, hcl=10, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  tankContents <- c(water=10000, hcl=10, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  tankContents <- c(water=10000, hcl=10, naoh=0) # (litres, grams, grams)
+  phs <- c(phs, measurePhWithRollingAverage(tankContents))
+  
+  phs
+}
+
+
 
 # Instantanously adds an acid dose
 instantaneousAcidDose <- function(tankContents, doseAmount) {
@@ -263,23 +333,26 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   if (is.null(previousPh)) previousPh <- 7
   pumpPercentage <- proportionalPumpControl(previousPh,
                                             phSetpoint,
-                                            2)
+                                            10)
   recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
   # Measure the pH in the recirc line
   recircContents <- chemicalReaction(recircContents)
-  measuredPhRecirc <- measurePh(recircContents)
-  names(measuredPhRecirc) <- c("ph.recirc", "linear_ph.recirc")
-  attr(update, "ph.recirc") <<- measuredPhRecirc["ph.recirc"]
+  #measuredPhRecirc <- measurePh(recircContents)
+  phRecirc <- measurePhWithRollingAverage(recircContents)
+  linearPhRecirc <- linearisePh(phRecirc)
+  names(phRecirc) <- "ph.recirc"
+  names(linearPhRecirc) <- "linear_ph.recirc"
+  attr(update, "ph.recirc") <<- phRecirc
   # Bleed some of the recirc water
   recircContents <- bleed(recircContents, recircRate, timeDelta)
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
   # Measure the pH in the tank
   tankContents <- chemicalReaction(tankContents)
-  measuredPhTank <- measurePh(tankContents)
-  names(measuredPhTank) <- c("ph.tank", "linear_ph.tank")
-  
-  return(list(tankContents=tankContents, data=c(measuredPhRecirc, measuredPhTank, pumpPercentage)))
+  phTank <- measurePh(tankContents)
+  names(phTank) <- "ph.tank"
+
+  return(list(tankContents=tankContents, data=c(phRecirc, linearPhRecirc, phTank, pumpPercentage)))
 }
 
 init_update <- function() {
@@ -298,6 +371,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   init_update()
   init_makeupWater()
   init_doseAcidAtFixedRate()
+  init_measurePhWithRollingAverage(10)
   time <- 0
   results <- NULL
   
@@ -311,11 +385,14 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=50*60, timeDelta=1)
+results <- run(tankContents, recirculationRate, duration=30*60, timeDelta=1)
 
-plot(results$time/60, results$water, type="l")
-plot(results$time/60, results$ph.tank, type="l")
-plot(results$time/60, results$ph.recirc, type="l")
-plot(results$time/60, results$linear_ph.recirc, type="l")
+plot(results$time/60, results$water, type="l",
+     main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
+plot(results$time/60, results$ph.tank, type="l",
+     main="pH in Tank", xlab="Time (mins)", ylab="pH")
+plot(results$time/60, results$ph.recirc, type="l",
+     main="pH in Recirc Line", xlab="Time (mins)", ylab="pH")
+#plot(results$time/60, results$linear_ph.recirc, type="l")
 
 
