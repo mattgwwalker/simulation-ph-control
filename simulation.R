@@ -188,6 +188,18 @@ doseCausticAtFixedRate <- function(liquidContents, doseRate, timeDelta) {
   return(liquidContents)
 }
 
+maxPumpRate <- 60/60/60 # litres/second
+pumpCausticSolution <- function(liquidContents, pumpPercentage, maxPumpRate, timeDelta) {
+  pumpRate <- maxPumpRate * pumpPercentage / 100 # litres / second
+  pumpVolume <- pumpRate * timeDelta # litres
+  densityOfCausticSolution <- 1220 # grams / litre
+  pumpWeight <- pumpVolume * densityOfCausticSolution # grams
+  proportionOfCausticByWeight <- 0.20 
+  causticDose <- pumpWeight * proportionOfCausticByWeight # grams
+  liquidContents["naoh"] <- liquidContents["naoh"] + causticDose
+  return(liquidContents)
+}
+
 chemicalReaction <- function(liquidContents) {
   hcl <- unname(liquidContents["hcl"])
   naoh <- unname(liquidContents["naoh"])
@@ -215,11 +227,29 @@ chemicalReaction <- function(liquidContents) {
   return(liquidContents)
 }
 
+proportionalPumpControl <- function(pv, sp, p) {
+  err <- sp - pv
+  result <- err * p
+  
+  # Clamp output to 0 to 100%
+  if (result > 100) result <- 100
+  if (result < 0) result <- 0
+  
+  names(result) <- "pump.output"
+  return(result)
+}
+
+test_proportionalPumpControl <- function() {
+  sp <- 8
+  pv <- 6
+  proportionalPumpControl(pv, sp, 100)
+}
+
 # Simulates the system through a single time step
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
   if (time>60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 100, 5*60, timeDelta)
+    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
   }
   # Add makup water
   tankContents <- makeupWater(tankContents, makeupWaterRate, makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
@@ -228,24 +258,36 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   tankContents <- recircResult$tankContents
   recircContents <- recircResult$recircContents
   # Dose caustic
-  recircContents <- doseCausticAtFixedRate(recircContents, 0.1, timeDelta)
-  recircContents <- chemicalReaction(recircContents)
+  phSetpoint <- 8
+  previousPh <- attr(update, "ph.recirc")
+  if (is.null(previousPh)) previousPh <- 7
+  pumpPercentage <- proportionalPumpControl(previousPh,
+                                            phSetpoint,
+                                            2)
+  recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
   # Measure the pH in the recirc line
+  recircContents <- chemicalReaction(recircContents)
   measuredPhRecirc <- measurePh(recircContents)
   names(measuredPhRecirc) <- c("ph.recirc", "linear_ph.recirc")
+  attr(update, "ph.recirc") <<- measuredPhRecirc["ph.recirc"]
   # Bleed some of the recirc water
   recircContents <- bleed(recircContents, recircRate, timeDelta)
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
-  tankContents <- chemicalReaction(tankContents)
   # Measure the pH in the tank
+  tankContents <- chemicalReaction(tankContents)
   measuredPhTank <- measurePh(tankContents)
   names(measuredPhTank) <- c("ph.tank", "linear_ph.tank")
   
-  return(list(tankContents=tankContents, ph.recirc=measuredPhRecirc, ph.tank=measuredPhTank))
+  return(list(tankContents=tankContents, data=c(measuredPhRecirc, measuredPhTank, pumpPercentage)))
+}
+
+init_update <- function() {
+  attr(update, "ph.recirc") <<- 7
 }
 
 test_update <- function() {
+  init_update()
   tankContents <- c(water=10000, hcl=1000, naoh=0) # (litres, grams, grams)
   update(tankContents, recirculationRate, 1, timeDelta=1)
   # No test defined
@@ -253,6 +295,7 @@ test_update <- function() {
 
 # Simulates the system through multiple time steps
 run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
+  init_update()
   init_makeupWater()
   init_doseAcidAtFixedRate()
   time <- 0
@@ -262,13 +305,13 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
     result <- update(tankContents, recircRate, time, timeDelta)
     tankContents <- result$tankContents
     time <- time + timeDelta
-    results <- rbind(results, c(time=time, result$tankContents, result$ph.recirc, result$ph.tank))
+    results <- rbind(results, c(time=time, result$tankContents, result$data))
   }
   
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=100*60, timeDelta=1)
+results <- run(tankContents, recirculationRate, duration=50*60, timeDelta=1)
 
 plot(results$time/60, results$water, type="l")
 plot(results$time/60, results$ph.tank, type="l")
