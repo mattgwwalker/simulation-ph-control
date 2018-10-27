@@ -189,6 +189,10 @@ measurePhWithRollingAverage <- function(liquidContents) {
   total <- attr(measurePhWithRollingAverage, "total")
   
   measuredPh <- measurePh(liquidContents)
+  
+  # Add noise
+  measuredPh <- rnorm(1, mean=measuredPh, sd=abs(0.1*measuredPh))
+  
   pushback(previousValues, measuredPh)
 
   total <- total + measuredPh
@@ -325,7 +329,13 @@ pumpCausticSolutionWithRollingAverage <- function(liquidContents, pumpPercentage
   
   attr(pumpCausticSolutionWithRollingAverage, "total") <<- total
   
+  stopifnot(count!=0)
   result <- total / count
+  
+  # Add noise
+  result <- rnorm(1, mean=result, sd=abs(0.05*result))
+  if (result > 100) result <- 100
+  if (result < 0) result <- 0
   
   pumpCausticSolution(liquidContents, result, maxPumpRate, timeDelta)
 }  
@@ -341,18 +351,25 @@ init_pumpCausticSolutionWithRollingAverage <- function(duration, timeDelta) {
 
 
 chemicalReaction <- function(liquidContents) {
+  # Neutralise the HCl and NaOH, produce NaCl
+  
   hcl <- unname(liquidContents["hcl"])
   naoh <- unname(liquidContents["naoh"])
+  nacl <- unname(liquidContents["nacl"])
   
-  gramsPerMolHcl <- 36
-  gramsPerMolNaoh <- 40
+  gramsPerMolHcl <- 36.46
+  gramsPerMolNaoh <- 39.99
+  gramsPerMolNacl <- 58.44
+  
   molHcl <- hcl / gramsPerMolHcl
   molNaoh <- naoh / gramsPerMolNaoh
   
   if (molHcl > molNaoh) {
+    molNacl <- molNaoh
     molHcl <- molHcl - molNaoh
     molNaoh <- 0
   } else {
+    molNacl <- molHcl
     molNaoh <- molNaoh - molHcl
     molHcl <- 0
   }
@@ -360,11 +377,21 @@ chemicalReaction <- function(liquidContents) {
   # Convert back to grams
   hcl <- molHcl * gramsPerMolHcl
   naoh <- molNaoh * gramsPerMolNaoh
+  nacl <- nacl + molNacl * gramsPerMolNacl
   
   liquidContents["hcl"] <- hcl
   liquidContents["naoh"] <- naoh
+  liquidContents["nacl"] <- nacl
   
   return(liquidContents)
+}
+
+test_chemicalReaction <- function() {
+  start <- c(water=10000, hcl=1000, naoh=1000, nacl=0) # (litres, grams, grams, grams)
+  result <- chemicalReaction(start)
+  stopifnot( abs(result["hcl"] - 88.2) < 0.1 )
+  stopifnot( abs(result["naoh"] - 0) < 0.1 )
+  stopifnot( abs(result["nacl"] - 1461.4) < 0.1 )
 }
 
 proportionalPumpControl <- function(pv, sp, p) {
@@ -386,6 +413,7 @@ test_proportionalPumpControl <- function() {
 }
 
 # Simulates the system through a single time step
+phSetpoint <- 8
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
   if (time>60) {
@@ -402,7 +430,6 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   recircContents <- recircResult$recircContents
   
   # Dose caustic
-  phSetpoint <- 8
   previousPh <- attr(update, "ph.recirc")
   if (is.null(previousPh)) previousPh <- 7
   pumpPercentage <- proportionalPumpControl(previousPh,
@@ -468,23 +495,29 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=70*60, timeDelta=0.2)
+results <- run(tankContents, recirculationRate, duration=70*60, timeDelta=1)
 
 plot(results$time/60, results$water, type="l",
      main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
+
 plot(results$time/60, results$ph.tank, type="l",
      main="pH in Tank", xlab="Time (mins)", ylab="pH",
      ylim=c(0,14))
+abline(h=phSetpoint, col="grey")
 
 plot(results$time/60, results$ph.recirc, type="l",
      main="pH in Recirc Line (black)\nand Pump Speed (red)", xlab="Time (mins)", ylab="pH",
      ylim=c(0,14), xlim=c(30,60))
-abline(h=8, col="grey")
+abline(h=phSetpoint, col="grey")
 par(new = T)
 plot(results$time/60, results$pump.output, type="l", col="red",
      ylim=c(0,100), axes=F, xlab=NA, ylab=NA,
      xlim=c(30,60))
 abline(h=10, col="grey")
+
+plot(results$time/60, results$nacl/(results$water*1000)*100, type="l",
+     main="Proportion of Salt", xlab="Time (mins)", ylab="Salt percentage by weight (%)")
+
 
 #plot(results$time/60, results$linear_ph.recirc, type="l")
 
