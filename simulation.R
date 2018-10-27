@@ -182,27 +182,23 @@ test_measurePh <- function() {
 
 # Simulate a slower-to-respond pH probe
 measurePhWithRollingAverage <- function(liquidContents) {
-  previousValues <- attr(measurePhWithRollingAverage, "previousValues")
-  numOfSamples <- length(previousValues)
-  count <- attr(measurePhWithRollingAverage, "count")
-  index <- attr(measurePhWithRollingAverage, "index")
+  previousValues <- attr(measurePhWithRollingAverage, "queue")
+  count <- length(previousValues)
+  desiredSamples <- attr(measurePhWithRollingAverage, "desiredSamples")
   total <- attr(measurePhWithRollingAverage, "total")
   
   measuredPh <- measurePh(liquidContents)
+  pushback(previousValues, measuredPh)
 
   total <- total + measuredPh
-  if (count!=0) {
-    total <- total - previousValues[index]
-  }
-  previousValues[index] <- measuredPh
-  index <- index + 1
-  if (index > numOfSamples) index <- 1
   count <- count + 1
-  if (count > numOfSamples) count <- numOfSamples
   
-  attr(measurePhWithRollingAverage, "previousValues") <<- previousValues
-  attr(measurePhWithRollingAverage, "count") <<- count
-  attr(measurePhWithRollingAverage, "index") <<- index
+  if (count > desiredSamples) {
+    total <- total - pop(previousValues)
+    count <- count - 1
+  }
+  
+
   attr(measurePhWithRollingAverage, "total") <<- total
   
   result <- total / count
@@ -210,16 +206,16 @@ measurePhWithRollingAverage <- function(liquidContents) {
   result
 }
 
-init_measurePhWithRollingAverage <- function(numOfSamples) {
-  attr(measurePhWithRollingAverage, "previousValues") <<- numeric(numOfSamples)
-  attr(measurePhWithRollingAverage, "count") <<- 0
-  attr(measurePhWithRollingAverage, "index") <<- 0
+init_measurePhWithRollingAverage <- function(duration, timeDelta) {
+  desiredSamples <- duration * timeDelta
+  attr(measurePhWithRollingAverage, "queue") <<- queue()
+  attr(measurePhWithRollingAverage, "desiredSamples") <<- desiredSamples
   attr(measurePhWithRollingAverage, "total") <<- 0
 }
 
 
 test_measurePhWithRollingAverage <- function() {
-  init_measurePhWithRollingAverage(3)
+  init_measurePhWithRollingAverage(1, 1)
   phs <- NULL
   tankContents <- c(water=10000, hcl=100, naoh=0) # (litres, grams, grams)
   phs <- c(phs, measurePhWithRollingAverage(tankContents))
@@ -375,7 +371,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   if (is.null(previousPh)) previousPh <- 7
   pumpPercentage <- proportionalPumpControl(previousPh,
                                             phSetpoint,
-                                            3)
+                                            2)
   recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
 
   # Delay the contents of the pipe
@@ -421,7 +417,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   init_delay(2.5, timeDelta)
   init_makeupWater()
   init_doseAcidAtFixedRate()
-  init_measurePhWithRollingAverage(10)
+  init_measurePhWithRollingAverage(20, timeDelta)
   time <- 0
   results <- NULL
   
@@ -444,11 +440,12 @@ plot(results$time/60, results$ph.tank, type="l",
      ylim=c(0,14))
 
 plot(results$time/60, results$ph.recirc, type="l",
-     main="pH in Recirc Line", xlab="Time (mins)", ylab="pH",
+     main="pH in Recirc Line (black)\nand Pump Speed (red)", xlab="Time (mins)", ylab="pH",
      ylim=c(0,14))
 par(new = T)
 plot(results$time/60, results$pump.output, type="l", col="red",
      ylim=c(0,100), axes=F, xlab=NA, ylab=NA)
+abline(h=10, col="grey")
 
 #plot(results$time/60, results$linear_ph.recirc, type="l")
 
