@@ -30,19 +30,24 @@ returnRecirc <- function(tankContents, recircContents) {
 
 # Simulates make-up water
 makeupWaterRate <- 6000 / 60 / 60 # litres / second
-makeupWater <- function(tankContents, makeupWaterRate, onVolume=8000, offVolume=10000, timeDelta) {
-  # Initial value of makeupWaterOn
-  makeupWaterOn <- attr(makeupWater, "state")
-  if (is.null(makeupWaterOn)) makeupWaterOn <- FALSE
-
+makeupWaterHigh <- 10000 # litres
+makeupWaterLow <- 8000   # litres
+makeupWater <- function(tankContents, makeupWaterRate, onVolume, offVolume, timeDelta) {
+  # Turn make up water on if necessary
   if (tankContents["water"] <= onVolume) {
     # Turn makeup water on
     attr(makeupWater, "state") <<- TRUE
   }
-  if (tankContents["water"] > offVolume) {
+  
+  # Turn make up water off if necessary
+  if (tankContents["water"] >= offVolume) {
     # Turn makeup water off
     attr(makeupWater, "state") <<- FALSE
   }
+  
+  # Get current value of makeupWaterOn
+  makeupWaterOn <- attr(makeupWater, "state")
+  if (is.null(makeupWaterOn)) makeupWaterOn <- FALSE
   
   if (makeupWaterOn) {
     makeupWaterVolume <- makeupWaterRate * timeDelta
@@ -69,6 +74,16 @@ test_makeupWater <- function() {
   stopifnot(result["naoh"] == 0)
   
   # Make up water should now be off
+  result <- makeupWater(result, 
+                        makeupWaterRate = 1, 
+                        onVolume = 0,
+                        offVolume = 1,
+                        timeDelta = 1)
+  stopifnot(result["water"] == 1)
+  stopifnot(result["hcl"] == 0)
+  stopifnot(result["naoh"] == 0)  
+  
+  # Make up water should stay off
   result <- makeupWater(result, 
                         makeupWaterRate = 1, 
                         onVolume = 0,
@@ -167,26 +182,67 @@ test_doseAcidAtFixedRate <- function() {
   stopifnot(result["hcl"] == 400)
 }
 
+
+doseCausticAtFixedRate <- function(liquidContents, doseRate, timeDelta) {
+  liquidContents["naoh"] <- liquidContents["naoh"] + doseRate * timeDelta
+  return(liquidContents)
+}
+
+chemicalReaction <- function(liquidContents) {
+  hcl <- unname(liquidContents["hcl"])
+  naoh <- unname(liquidContents["naoh"])
+  
+  gramsPerMolHcl <- 36
+  gramsPerMolNaoh <- 40
+  molHcl <- hcl / gramsPerMolHcl
+  molNaoh <- naoh / gramsPerMolNaoh
+  
+  if (molHcl > molNaoh) {
+    molHcl <- molHcl - molNaoh
+    molNaoh <- 0
+  } else {
+    molNaoh <- molNaoh - molHcl
+    molHcl <- 0
+  }
+  
+  # Convert back to grams
+  hcl <- molHcl * gramsPerMolHcl
+  naoh <- molNaoh * gramsPerMolNaoh
+  
+  liquidContents["hcl"] <- hcl
+  liquidContents["naoh"] <- naoh
+  
+  return(liquidContents)
+}
+
 # Simulates the system through a single time step
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
-  if (time>10) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
+  if (time>60) {
+    tankContents <- doseAcidAtFixedRate(tankContents, 100, 5*60, timeDelta)
   }
   # Add makup water
-  tankContents <- makeupWater(tankContents, makeupWaterRate, timeDelta=timeDelta)
+  tankContents <- makeupWater(tankContents, makeupWaterRate, makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
   # Recirc the water
   recircResult <- recirc(tankContents, recircRate, timeDelta)
   tankContents <- recircResult$tankContents
   recircContents <- recircResult$recircContents
-  # Measure the pH
-  measuredPh <- measurePh(recircContents)
+  # Dose caustic
+  recircContents <- doseCausticAtFixedRate(recircContents, 0.1, timeDelta)
+  recircContents <- chemicalReaction(recircContents)
+  # Measure the pH in the recirc line
+  measuredPhRecirc <- measurePh(recircContents)
+  names(measuredPhRecirc) <- c("ph.recirc", "linear_ph.recirc")
   # Bleed some of the recirc water
   recircContents <- bleed(recircContents, recircRate, timeDelta)
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
+  tankContents <- chemicalReaction(tankContents)
+  # Measure the pH in the tank
+  measuredPhTank <- measurePh(tankContents)
+  names(measuredPhTank) <- c("ph.tank", "linear_ph.tank")
   
-  return(list(tankContents=tankContents, ph=measuredPh))
+  return(list(tankContents=tankContents, ph.recirc=measuredPhRecirc, ph.tank=measuredPhTank))
 }
 
 test_update <- function() {
@@ -206,17 +262,17 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
     result <- update(tankContents, recircRate, time, timeDelta)
     tankContents <- result$tankContents
     time <- time + timeDelta
-    results <- rbind(results, c(time=time, result$tankContents, result$ph))
+    results <- rbind(results, c(time=time, result$tankContents, result$ph.recirc, result$ph.tank))
   }
   
   return(data.frame(results))
 }
 
-results <- run(tankContents, recirculationRate, duration=20*60, timeDelta=0.2)
+results <- run(tankContents, recirculationRate, duration=100*60, timeDelta=1)
 
-plot(results$time/60, results$ph, type="l")
 plot(results$time/60, results$water, type="l")
-plot(results$time/60, results$hcl/results$water, type="l")
-plot(results$time/60, results$linear_ph, type="l")
+plot(results$time/60, results$ph.tank, type="l")
+plot(results$time/60, results$ph.recirc, type="l")
+plot(results$time/60, results$linear_ph.recirc, type="l")
 
 
