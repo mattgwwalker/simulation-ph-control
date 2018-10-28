@@ -141,6 +141,7 @@ test_makeupWater <- function() {
 }
 
 # Simulates the measurement of pH
+# A site detailing a similar algorithm: http://science.widener.edu/svb/pset/acidbase.html
 measurePh <- function(liquidContents) {
   hcl <- unname(liquidContents["hcl"])
   naoh <- unname(liquidContents["naoh"])
@@ -170,18 +171,8 @@ measurePh <- function(liquidContents) {
   stopifnot(hcl==0 || naoh==0)
   
 
-
-  
-  
-  
-    
-
-  
-  
-  
-
   if (h2co3!=0 && hco3!=0) {
-    # The buffer isn't broken
+    # The solution is a buffer
     pKa <- 6.1 # for H2CO3
     ka <- 10^(-pKa)
     
@@ -202,11 +193,6 @@ measurePh <- function(liquidContents) {
       log(abs(f(h, ka, molH2co3, molHco3, water)))
     }
     
-    #ph1 <- optimize(f2, lower=0, upper=14)$minimum
-    #ph2 <- optim(0, f2, lower=0, upper=14, method="Brent")$par
-    #ph3 <- optim(0, f2, lower=0, upper=14, method="SANN")$par
-    #ph4 <- optim(0, f2, method="CG")$par
-
     multisearch_optimize <- function(f, lower, upper, divisions=10) {
       # Calulate ranges
       stepSize = (upper - lower)/divisions
@@ -228,23 +214,30 @@ measurePh <- function(liquidContents) {
     }
     
     ph <- multisearch_optimize(f2, 0, 14, 14)$minimum    
-    
-        
-    if(ph>13) {
-      cat(ph)
-    }
-    
+
     return(ph)
-    
   }
   
-  # Test - quadratic solution
-  c1 <- molH2co3 / water # weak acid concentration
-  c2 <- molHcl / water # strong acid concentration
-  pKa <- 6.1 # for H2CO3
-  ka <- 10^(-pKa)
-  ph <- -log10((c2+sqrt(c2^2 + 4*ka*c1))/2)
-  return(ph)
+  if (hcl > 0) {
+    # Calculate the pH of a strong acid mixed with a weak acid (see https://chemistry.stackexchange.com/questions/69307/calculation-of-the-ph-of-a-mixture-of-a-strong-acid-and-weak-acid)
+    c1 <- molH2co3 / water # weak acid concentration
+    c2 <- molHcl / water # strong acid concentration
+    pKa <- 6.1 # for H2CO3
+    ka <- 10^(-pKa)
+    ph <- -log10((c2+sqrt(c2^2 + 4*ka*c1))/2)
+    return(ph)
+  }
+  
+  if (naoh > 0) {
+    # Calculate the pH of a strong base mixed with a weak base (guess at formula based on above)
+    c1 <- molHco3 / water # weak base concentration
+    c2 <- molNaoh / water # strong base concentration
+    pKb <- 7.7 # for HCO3
+    kb <- 10^(-pKb)
+    poh <- -log10((c2+sqrt(c2^2 + 4*kb*c1))/2)
+    ph <- 14 - poh
+    return(ph)
+  }
   
   
   
@@ -618,9 +611,18 @@ phSetpoint <- 8
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
   if (time>60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 10*60, timeDelta)
+    tankContents <- doseAcidAtFixedRate(tankContents, 100, 4*60, timeDelta)
   }
   
+  # Dose caustic into tank
+  if (time>5*60) {
+    doseRate <- 100 / (5*60) # grams / second
+    tankContents <- doseCausticAtFixedRate(tankContents, doseRate, timeDelta)
+  }
+
+  tankContents <- chemicalReaction(tankContents)
+  
+    
   # Add makup water
 #  tankContents <- makeupWater(tankContents, makeupWaterRate, 
 #                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
@@ -724,84 +726,4 @@ plot(results$time/60, results$nacl/(results$water*1000)*100, type="l",
 
 
 #plot(results$time/60, results$linear_ph.recirc, type="l")
-
-exit()
-
-
-# Testing equation 3 from "The Henderson–Hasselbalch Equation: Its History and Limitations" see https://pdfs.semanticscholar.org/5275/451edb70a6a86c232cf7605cc251277a829b.pdf
-
-f <- function(ph, ka, molOfAcid, molOfSalt, volume) {
-  h <- 10^(-ph)
-  ma <- molOfAcid / volume
-  mb <- molOfSalt / volume
-  oh <- 10^-14 / h
-  
-  numerator <- ma - h + oh
-  denominator <- mb + h - oh
-  
-  ka * numerator / denominator - h
-}
-
-ka <- 1.8 * 10^-5
-molOfAcid <- 0.45
-molOfSalt <- 0.94
-volume <- 1
-
-ka <- 1.8 * 10^-5
-molOfAcid <- 0.009
-molOfSalt <- 0.13
-volume <- 1
-
-
-ka <- 10^(-7)
-molOfAcid <- 0.0009
-molOfSalt <- 0.0001
-volume <- 0.1
-
-
-ka <- 7.94 * 10^-7
-molOfAcid <- 0.42
-molOfSalt <- 0.436
-volume <- 9969
-
-ka <- 7.94 * 10^-7
-molOfAcid <- 0.8562
-molOfSalt <- 0.001318
-volume <- 9969
-
-
-f2 <- function(h) {
-  log(abs(f(h, ka, molOfAcid, molOfSalt, volume)))
-}
-
-#optimize(f2, lower=0, upper=14)
-#optim(7, f2, lower=0, upper=14, method="Brent")$par
-#library(pracma)
-#steep_descent(0, f2)
-
-x <- seq(0,14, length=1000)
-plot(x, f2(x))
-
-
-multisearch_optimize <- function(f, lower, upper, divisions=10) {
-  # Calulate ranges
-  stepSize = (upper - lower)/divisions
-  lowers <- seq(lower, upper-stepSize, stepSize)
-  uppers <- seq(lower+stepSize, upper, stepSize)
-  
-  minSoFar = NA
-  result = NA
-  for (i in 1:divisions) {
-    thisResult <- optimize(f, lower=lowers[i], upper=uppers[i])
-    thisMin <- thisResult$objective
-    if (is.na(minSoFar) || thisMin < minSoFar) {
-      minSoFar <- thisMin
-      result <- thisResult
-    }
-  }
-  
-  return(result)
-}
-
-multisearch_optimize(f2, 0, 14, 14)
 
