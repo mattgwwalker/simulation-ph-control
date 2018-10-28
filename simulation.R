@@ -3,6 +3,9 @@ library(dequer)
 # Christchurch water as at 2018-10-28 as per https://www.ccc.govt.nz/services/water-and-drainage/water-supply/quality-and-monitoring/water-quality-and-monitoring/
 christchurchWater <- c(water=1000, hcl=0, naoh=0, nacl=0, h2co3=1, hco3=52) # (litres, grams, grams, grams)
 
+# Modified as per commissioning experience
+christchurchWater <- c(water=1000, hcl=0, naoh=0, nacl=0, h2co3=0.5/10, hco3=52/10) # (litres, grams, grams, grams)
+
 tankContents <- c(water=10000, hcl=0, naoh=0, nacl=0) # (litres, grams, grams, grams)
 bleedRate <- 1.5 # litres / second
 recirculationRate = 124000/60/60 # litres / second 
@@ -164,16 +167,87 @@ measurePh <- function(liquidContents) {
   molHco3 <- hco3 / gramsPerMolHco3  
   
   # Check that neuralisation has already occurred
-  stopifnot(hcl==0 | naoh==0)
+  stopifnot(hcl==0 || naoh==0)
   
-  if (h2co3!=0 & hco3!=0) {
+
+
+  
+  
+  
+    
+
+  
+  
+  
+
+  if (h2co3!=0 && hco3!=0) {
     # The buffer isn't broken
     pKa <- 6.1 # for H2CO3
-    molH2co3PerLitre <- molH2co3 / water
-    molHco3PerLitre <- molHco3 / water
-    ph <- pKa + log10(molHco3PerLitre / molH2co3PerLitre)
+    ka <- 10^(-pKa)
+    
+    # Equation 3 from "The Henderson–Hasselbalch Equation: Its History and Limitations" see https://pdfs.semanticscholar.org/5275/451edb70a6a86c232cf7605cc251277a829b.pdf
+    f <- function(ph, ka, molOfAcid, molOfSalt, volume) {
+      h <- 10^(-ph)
+      ma <- molOfAcid / volume
+      mb <- molOfSalt / volume
+      oh <- 10^-14 / h
+      
+      numerator <- ma - h + oh
+      denominator <- mb + h - oh
+      
+      ka * numerator / denominator - h
+    }
+    
+    f2 <- function(h) {
+      log(abs(f(h, ka, molH2co3, molHco3, water)))
+    }
+    
+    #ph1 <- optimize(f2, lower=0, upper=14)$minimum
+    #ph2 <- optim(0, f2, lower=0, upper=14, method="Brent")$par
+    #ph3 <- optim(0, f2, lower=0, upper=14, method="SANN")$par
+    #ph4 <- optim(0, f2, method="CG")$par
+
+    multisearch_optimize <- function(f, lower, upper, divisions=10) {
+      # Calulate ranges
+      stepSize = (upper - lower)/divisions
+      lowers <- seq(lower, upper-stepSize, stepSize)
+      uppers <- seq(lower+stepSize, upper, stepSize)
+      
+      minSoFar = NA
+      result = NA
+      for (i in 1:divisions) {
+        thisResult <- optimize(f, lower=lowers[i], upper=uppers[i])
+        thisMin <- thisResult$objective
+        if (is.na(minSoFar) || thisMin < minSoFar) {
+          minSoFar <- thisMin
+          result <- thisResult
+        }
+      }
+      
+      return(result)
+    }
+    
+    ph <- multisearch_optimize(f2, 0, 14, 14)$minimum    
+    
+        
+    if(ph>13) {
+      cat(ph)
+    }
+    
     return(ph)
+    
   }
+  
+  # Test - quadratic solution
+  c1 <- molH2co3 / water # weak acid concentration
+  c2 <- molHcl / water # strong acid concentration
+  pKa <- 6.1 # for H2CO3
+  ka <- 10^(-pKa)
+  ph <- -log10((c2+sqrt(c2^2 + 4*ka*c1))/2)
+  return(ph)
+  
+  
+  
   
   # The bufer's broken; just ignore the weak acid and its conjugate base
   if (hcl > 0) {
@@ -192,7 +266,7 @@ measurePh <- function(liquidContents) {
     ph <- 7
   }
 
-  stopifnot(ph > 0 & ph < 14)
+  stopifnot(ph > 0 && ph < 14)
   
   ph
 }
@@ -213,12 +287,14 @@ test_measurePh <- function() {
   
   tankContents <- c(water=1000, hcl=0, naoh=0, nacl=0, h2co3=0.5, hco3=52) # (litres, grams, grams)
   result <- measurePh(tankContents)
-  stopifnot(abs(result - 8.12) < 0.01)
+  #stopifnot(abs(result - 8.12) < 0.01) # As per the Henderson–Hasselbalch Equation
+  stopifnot(abs(result - 8.07) < 0.01) # As per the Equation 3 of "The Henderson–Hasselbalch Equation: Its History and Limitations"
+  
 }
 
 
 # Simulate a slower-to-respond pH probe
-measurePhWithRollingAverage <- function(liquidContents) {
+measurePhWithRollingAverage <- function(liquidContents, noise=0.1) {
   previousValues <- attr(measurePhWithRollingAverage, "queue")
   count <- length(previousValues)
   desiredSamples <- attr(measurePhWithRollingAverage, "desiredSamples")
@@ -228,7 +304,7 @@ measurePhWithRollingAverage <- function(liquidContents) {
   if (is.na(measuredPh)) return(NA)
   
   # Add noise
-  measuredPh <- rnorm(1, mean=measuredPh, sd=abs(0.1*measuredPh))
+  measuredPh <- rnorm(1, mean=measuredPh, sd=abs(noise*measuredPh))
   
   pushback(previousValues, measuredPh)
 
@@ -245,7 +321,7 @@ measurePhWithRollingAverage <- function(liquidContents) {
 
   stopifnot(count>0)  
   result <- total / count
-  stopifnot(result >= 0 & result <= 14)
+  stopifnot(result >= 0 && result <= 14)
   result
 }
 
@@ -542,7 +618,7 @@ phSetpoint <- 8
 update <- function(tankContents, recircRate, time, timeDelta) {
   # Add acid
   if (time>60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 100, 45*60, timeDelta)
+    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 10*60, timeDelta)
   }
   
   # Add makup water
@@ -583,6 +659,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   
   # Measure the pH in the tank
   tankContents <- chemicalReaction(tankContents)
+  #phTank <- measurePhWithRollingAverage(tankContents, noise=0)
   phTank <- measurePh(tankContents)
   names(phTank) <- "ph.tank"
 
@@ -606,7 +683,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   init_delay(1, timeDelta)
   init_makeupWater()
   init_doseAcidAtFixedRate()
-  init_measurePhWithRollingAverage(10, timeDelta)
+  init_measurePhWithRollingAverage(100, timeDelta)
   init_pumpCausticSolutionWithRollingAverage(2, timeDelta)
   time <- 0
   results <- NULL
@@ -621,7 +698,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(christchurchWater*10, recirculationRate, duration=70*60, timeDelta=1)
+results <- run(christchurchWater*10, recirculationRate, duration=15*60, timeDelta=0.1)
 
 plot(results$time/60, results$water, type="l",
      main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
@@ -630,6 +707,7 @@ plot(results$time/60, results$ph.tank, type="l",
      main="pH in Tank", xlab="Time (mins)", ylab="pH",
      ylim=c(0,14))
 abline(h=phSetpoint, col="grey")
+abline(h=3.5, col="grey")
 
 plot(results$time/60, results$ph.recirc, type="l",
      main="pH in Recirc Line (black)\nand Pump Speed (red)", xlab="Time (mins)", ylab="pH",
@@ -647,4 +725,83 @@ plot(results$time/60, results$nacl/(results$water*1000)*100, type="l",
 
 #plot(results$time/60, results$linear_ph.recirc, type="l")
 
+exit()
+
+
+# Testing equation 3 from "The Henderson–Hasselbalch Equation: Its History and Limitations" see https://pdfs.semanticscholar.org/5275/451edb70a6a86c232cf7605cc251277a829b.pdf
+
+f <- function(ph, ka, molOfAcid, molOfSalt, volume) {
+  h <- 10^(-ph)
+  ma <- molOfAcid / volume
+  mb <- molOfSalt / volume
+  oh <- 10^-14 / h
+  
+  numerator <- ma - h + oh
+  denominator <- mb + h - oh
+  
+  ka * numerator / denominator - h
+}
+
+ka <- 1.8 * 10^-5
+molOfAcid <- 0.45
+molOfSalt <- 0.94
+volume <- 1
+
+ka <- 1.8 * 10^-5
+molOfAcid <- 0.009
+molOfSalt <- 0.13
+volume <- 1
+
+
+ka <- 10^(-7)
+molOfAcid <- 0.0009
+molOfSalt <- 0.0001
+volume <- 0.1
+
+
+ka <- 7.94 * 10^-7
+molOfAcid <- 0.42
+molOfSalt <- 0.436
+volume <- 9969
+
+ka <- 7.94 * 10^-7
+molOfAcid <- 0.8562
+molOfSalt <- 0.001318
+volume <- 9969
+
+
+f2 <- function(h) {
+  log(abs(f(h, ka, molOfAcid, molOfSalt, volume)))
+}
+
+#optimize(f2, lower=0, upper=14)
+#optim(7, f2, lower=0, upper=14, method="Brent")$par
+#library(pracma)
+#steep_descent(0, f2)
+
+x <- seq(0,14, length=1000)
+plot(x, f2(x))
+
+
+multisearch_optimize <- function(f, lower, upper, divisions=10) {
+  # Calulate ranges
+  stepSize = (upper - lower)/divisions
+  lowers <- seq(lower, upper-stepSize, stepSize)
+  uppers <- seq(lower+stepSize, upper, stepSize)
+  
+  minSoFar = NA
+  result = NA
+  for (i in 1:divisions) {
+    thisResult <- optimize(f, lower=lowers[i], upper=uppers[i])
+    thisMin <- thisResult$objective
+    if (is.na(minSoFar) || thisMin < minSoFar) {
+      minSoFar <- thisMin
+      result <- thisResult
+    }
+  }
+  
+  return(result)
+}
+
+multisearch_optimize(f2, 0, 14, 14)
 
