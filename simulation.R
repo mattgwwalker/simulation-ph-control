@@ -21,13 +21,49 @@ recirc <- function(tankContents, recircRate, timeDelta) {
 
 
 # Returns the liquid contents after bleeding
-bleed <- function(liquidContents, recircRate, timeDelta) {
+bleed <- function(liquidContents, bleedRate, timeDelta) {
   bleedTotalVolume <- bleedRate * timeDelta
   water <- liquidContents["water"]
   if (water == 0) return(liquidContents)
   bleedVolumes <- bleedTotalVolume/water * liquidContents 
   liquidContents <- liquidContents - bleedVolumes
   return(liquidContents)
+}
+
+
+conditionalBleed <- function(liquidContents, bleedRate, ph, timeDelta) {
+  minAcceptablePh <- attr(conditionalBleed, "minAcceptablePh")
+  maxAcceptablePh <- attr(conditionalBleed, "maxAcceptablePh")
+  waitTime <- attr(conditionalBleed, "waitTime")
+  thisWait <- attr(conditionalBleed, "thisWait")
+  
+  if (is.na(ph)) {
+    # pH isn't known, don't bleed
+    return(liquidContents)
+  }
+  if (ph>=minAcceptablePh && ph<=maxAcceptablePh){
+    # pH is acceptable to bleed
+    if (!is.na(thisWait)) {
+      if (thisWait>0) thisWait <- thisWait - timeDelta
+      if (thisWait<0) thisWait <- NA
+    } else {
+      # pH is acceptable and we do not have to wait
+      return(bleed(liquidContents, bleedRate, timeDelta))
+    }
+  } else {
+    # pH is not acceptable, reset timer
+    thisWait <- waitTime
+  }    
+  
+  attr(conditionalBleed, "thisWait") <<- thisWait
+  return(liquidContents)
+}
+
+init_conditionalBleed <- function(minAcceptablePh, maxAcceptablePh, waitTime) {
+  attr(conditionalBleed, "minAcceptablePh") <<- minAcceptablePh
+  attr(conditionalBleed, "maxAcceptablePh") <<- maxAcceptablePh
+  attr(conditionalBleed, "waitTime") <<- waitTime
+  attr(conditionalBleed, "thisWait") <<- NA
 }
 
 
@@ -96,19 +132,24 @@ makeupWater <- function(tankContents, makeupWaterRate, onVolume, offVolume, time
   if (is.null(makeupWaterOn)) makeupWaterOn <- FALSE
   
   if (makeupWaterOn) {
+    makeupWater <- attr(makeupWater, "makeupWater")
+    stopifnot(length(makeupWater) == length(tankContents))
     makeupWaterVolume <- makeupWaterRate * timeDelta
-    tankContents["water"] <- tankContents["water"] + makeupWaterVolume
+    tankContents <- tankContents + makeupWaterVolume*makeupWater
   }
     
   return(tankContents)
 }
 
-init_makeupWater <- function() {
+init_makeupWater <- function(makeupWater) {
   attr(makeupWater, "state") <<- FALSE
+  attr(makeupWater, "makeupWater") <<- makeupWater/makeupWater["water"]
 }
 
 test_makeupWater <- function() {
-  init_makeupWater()
+  distilledWater <- c(water=0, hcl=0, naoh=0)
+  init_makeupWater(distilledWater)
+  
   tankContents <- c(water=0, hcl=0, naoh=0) # (litres, grams, grams)
   result <- makeupWater(tankContents, 
                         makeupWaterRate = 1, 
@@ -154,7 +195,7 @@ measurePh <- function(liquidContents) {
   if (is.na(h2co3)) h2co3 <- 0
   if (is.na(hco3)) hco3 <- 0
   if (water<=0) {
-    return(7)
+    return(NA)
   }
 
   gramsPerMolHcl <- 36.46
@@ -287,7 +328,7 @@ test_measurePh <- function() {
 
 
 # Simulate a slower-to-respond pH probe
-measurePhWithRollingAverage <- function(liquidContents, noise=0.1) {
+measurePhWithRollingAverage <- function(liquidContents, noise=0.0) {
   previousValues <- attr(measurePhWithRollingAverage, "queue")
   count <- length(previousValues)
   desiredSamples <- attr(measurePhWithRollingAverage, "desiredSamples")
@@ -422,7 +463,17 @@ pumpCausticSolutionWithRollingAverage <- function(liquidContents, pumpPercentage
   count <- length(previousValues)
   desiredCommands <- attr(pumpCausticSolutionWithRollingAverage, "desiredCommands")
   total <- attr(pumpCausticSolutionWithRollingAverage, "total")
+  noise <- attr(pumpCausticSolutionWithRollingAverage, "noise")
   
+  # Pump didn't start unless it recieved a signal above 0.25%
+  if (pumpPercentage < 0.25) pumpPercentage <- 0
+  
+  # PCL-to-pump signal is analogue and the sender and receiver have resolutions
+  # which can be simulated as a number of steps from 0% to 100%.
+  steps <- 2048
+  pumpPercentage <- round(pumpPercentage/100 * steps)/steps * 100
+  
+    
   pushback(previousValues, pumpPercentage)
   
   total <- total + pumpPercentage
@@ -439,19 +490,22 @@ pumpCausticSolutionWithRollingAverage <- function(liquidContents, pumpPercentage
   result <- total / count
   
   # Add noise
-  result <- rnorm(1, mean=result, sd=abs(0.05*result))
+  result <- rnorm(1, mean=result, sd=abs(noise*result))
+  
+  # Clamp results between 0% and 100%
   if (result > 100) result <- 100
   if (result < 0) result <- 0
   
   pumpCausticSolution(liquidContents, result, maxPumpRate, timeDelta)
 }  
 
-init_pumpCausticSolutionWithRollingAverage <- function(duration, timeDelta) {
+init_pumpCausticSolutionWithRollingAverage <- function(duration, timeDelta, noise=0) {
   desiredCommands <- duration / timeDelta
   if (desiredCommands < 1) desiredCommands <- 1
   attr(pumpCausticSolutionWithRollingAverage, "queue") <<- queue()
   attr(pumpCausticSolutionWithRollingAverage, "desiredCommands") <<- desiredCommands
   attr(pumpCausticSolutionWithRollingAverage, "total") <<- 0
+  attr(pumpCausticSolutionWithRollingAverage, "noise") <<- noise
 }
 
 
@@ -588,8 +642,12 @@ test_chemicalReaction <- function() {
   stopifnot( abs(result["hco3"] - 19.8) < 0.1 )
 }
 
-proportionalPumpControl <- function(pv, sp, p) {
-  err <- sp - pv
+proportionalPumpControl <- function(pv, sp, p, directionOption=TRUE) {
+  if (directionOption) {
+    err <- sp - pv
+  } else{
+    err <- pv - sp
+  }
   result <- err * p
   
   # Clamp output to 0 to 100%
@@ -606,26 +664,61 @@ test_proportionalPumpControl <- function() {
   proportionalPumpControl(pv, sp, 100)
 }
 
-# Simulates the system through a single time step
-phSetpoint <- 8
-update <- function(tankContents, recircRate, time, timeDelta) {
-  # Add acid
-  if (time>60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 100, 4*60, timeDelta)
-  }
+setPointRamp <- function(timeDelta) {
+  duration <- attr(setPointRamp, "duration")
+  rate <- attr(setPointRamp, "rate")
+  current <- attr(setPointRamp, "current")
   
-  # Dose caustic into tank
-  if (time>5*60) {
-    doseRate <- 100 / (5*60) # grams / second
-    tankContents <- doseCausticAtFixedRate(tankContents, doseRate, timeDelta)
+  if (!is.na(duration)) {
+    time <- min(timeDelta, duration)
+    new <- current + rate*time
+    duration <- duration - time
+    if (duration<=0) duration <- NA
+    attr(setPointRamp, "current") <<- new
+    attr(setPointRamp, "duration") <<- duration
+    return(new)
+  } else{
+    return(current)
   }
+}
 
-  tankContents <- chemicalReaction(tankContents)
+command_setPointRamp <- function(current, desired, duration) {
+  attr(setPointRamp, "duration") <<- duration
+  attr(setPointRamp, "rate") <<- (desired-current)/duration
+  attr(setPointRamp, "current") <<- current
+}
+
+test_setPointRamp <- function() {
+  command_setPointRamp(0, 10, 5)
+  result <- setPointRamp(1)
+  stopifnot(abs(result - 2) < 0.01)
+
+  result <- setPointRamp(1)
+  stopifnot(abs(result - 4) < 0.01)
   
-    
+  command_setPointRamp(0, 10, 5)
+  result <- setPointRamp(6)
+  stopifnot(abs(result - 10) < 0.01)
+}
+
+# Simulates the system through a single time step
+phSetpoint <- NA
+previousPh <- NA
+update <- function(tankContents, recircRate, time, timeDelta) {
+  # Sanity check
+  if (tankContents["water"] <= 0) stop("There's no water in the tank!")
+  
+  # Update setpoint ramp
+  phSetpoint <- setPointRamp(timeDelta)
+
+  # Add acid
+  #if (time>60) {
+  #  tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
+  #}
+  
   # Add makup water
-#  tankContents <- makeupWater(tankContents, makeupWaterRate, 
-#                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
+  tankContents <- makeupWater(tankContents, makeupWaterRate, 
+                              makeupWaterLow, makeupWaterHigh, timeDelta=timeDelta)
   
   # Recirc the water
   recircResult <- recirc(tankContents, recircRate, timeDelta)
@@ -633,14 +726,16 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   recircContents <- recircResult$recircContents
   
   # Dose caustic
-#  previousPh <- attr(update, "ph.recirc")
-#  if (is.null(previousPh)) previousPh <- 7
-  pumpPercentage <- NA
-#  pumpPercentage <- proportionalPumpControl(previousPh,
-#                                            phSetpoint,
-#                                            2)
-  #recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
-#  recircContents <- pumpCausticSolutionWithRollingAverage(recircContents, pumpPercentage, maxPumpRate, timeDelta)
+  previousPh <- attr(update, "ph.recirc")
+  if (is.null(previousPh) || is.na(previousPh)) pumpPercentage <- 0
+  else {
+    pumpPercentage <- proportionalPumpControl(previousPh, phSetpoint, p=1)
+    #pumpPercentage <- proportionalPumpControl(10^(8-previousPh),
+    #                                          10^(8-phSetpoint),
+    #                                          p=0.01, FALSE)
+    #recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
+  }
+  recircContents <- pumpCausticSolutionWithRollingAverage(recircContents, pumpPercentage, maxPumpRate, timeDelta)
   
   # Delay the contents of the pipe
   recircContents <- delay(recircContents)
@@ -654,7 +749,8 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   attr(update, "ph.recirc") <<- phRecirc
   
   # Bleed some of the recirc water
-#  recircContents <- bleed(recircContents, recircRate, timeDelta)
+  #recircContents <- bleed(recircContents, bleedRate, timeDelta)
+  recircContents <- conditionalBleed(recircContents, bleedRate, phRecirc, timeDelta)
 
   # Return the remaining recirc water to the tank
   tankContents <- returnRecirc(tankContents, recircContents)
@@ -665,11 +761,15 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   phTank <- measurePh(tankContents)
   names(phTank) <- "ph.tank"
 
-  return(list(tankContents=tankContents, data=c(phRecirc, linearPhRecirc, phTank, pumpPercentage)))
+  return(list(tankContents=tankContents, data=c(setpoint=phSetpoint, phRecirc, linearPhRecirc, phTank, pumpPercentage)))
 }
 
-init_update <- function() {
-  attr(update, "ph.recirc") <<- 7
+init_update <- function(tankContents) {
+  tankContents <- chemicalReaction(tankContents)
+  phTank <- measurePh(tankContents)
+  attr(update, "ph.recirc") <<- phTank
+  phSetpoint <<- phTank
+  command_setPointRamp(phTank, 8.7, 5*60)
 }
 
 test_update <- function() {
@@ -681,12 +781,13 @@ test_update <- function() {
 
 # Simulates the system through multiple time steps
 run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
-  init_update()
+  init_update(tankContents)
   init_delay(1, timeDelta)
-  init_makeupWater()
+  init_makeupWater(christchurchWater)
+  init_conditionalBleed(6, 10, 30)
   init_doseAcidAtFixedRate()
-  init_measurePhWithRollingAverage(100, timeDelta)
-  init_pumpCausticSolutionWithRollingAverage(2, timeDelta)
+  init_measurePhWithRollingAverage(10, timeDelta)
+  init_pumpCausticSolutionWithRollingAverage(0, timeDelta)
   time <- 0
   results <- NULL
   
@@ -700,7 +801,7 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   return(data.frame(results))
 }
 
-results <- run(christchurchWater*10, recirculationRate, duration=15*60, timeDelta=0.1)
+results <- run(christchurchWater*10, recirculationRate, duration=10*60, timeDelta=0.5)
 
 plot(results$time/60, results$water, type="l",
      main="Volume in Tank", xlab="Time (mins)", ylab="Volume (litres)")
@@ -708,18 +809,16 @@ plot(results$time/60, results$water, type="l",
 plot(results$time/60, results$ph.tank, type="l",
      main="pH in Tank", xlab="Time (mins)", ylab="pH",
      ylim=c(0,14))
-abline(h=phSetpoint, col="grey")
-abline(h=3.5, col="grey")
+lines(results$time/60, results$setpoint, col="grey")
 
 plot(results$time/60, results$ph.recirc, type="l",
      main="pH in Recirc Line (black)\nand Pump Speed (red)", xlab="Time (mins)", ylab="pH",
-     ylim=c(0,14), xlim=c(30,60))
-abline(h=phSetpoint, col="grey")
+     ylim=c(0,14))
+lines(results$time/60, results$setpoint, col="grey")
 par(new = T)
 plot(results$time/60, results$pump.output, type="l", col="red",
-     ylim=c(0,100), axes=F, xlab=NA, ylab=NA,
-     xlim=c(30,60))
-abline(h=10, col="grey")
+     ylim=c(0,100), axes=F, xlab=NA, ylab=NA)
+axis(4)
 
 plot(results$time/60, results$nacl/(results$water*1000)*100, type="l",
      main="Proportion of Salt", xlab="Time (mins)", ylab="Salt percentage by weight (%)")
