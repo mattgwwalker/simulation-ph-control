@@ -346,6 +346,52 @@ init_measurePhWithRollingAverage <- function(duration, timeDelta) {
 }
 
 
+
+
+
+measurePhWithRollingAverage2 <- function(liquidContents, noise=0.0) {
+  previousValues <- attr(measurePhWithRollingAverage2, "queue")
+  count <- length(previousValues)
+  desiredSamples <- attr(measurePhWithRollingAverage2, "desiredSamples")
+  total <- attr(measurePhWithRollingAverage2, "total")
+  
+  measuredPh <- measurePh(liquidContents)
+  if (is.na(measuredPh)) return(NA)
+  
+  # Add noise
+  measuredPh <- rnorm(1, mean=measuredPh, sd=abs(noise*measuredPh))
+  
+  pushback(previousValues, measuredPh)
+  
+  total <- total + measuredPh
+  count <- count + 1
+  
+  if (count > desiredSamples) {
+    total <- total - pop(previousValues)
+    count <- count - 1
+  }
+  
+  
+  attr(measurePhWithRollingAverage2, "total") <<- total
+  
+  stopifnot(count>0)  
+  result <- total / count
+  stopifnot(result >= 0 && result <= 14)
+  result
+}
+
+init_measurePhWithRollingAverage2 <- function(duration, timeDelta) {
+  desiredSamples <- duration / timeDelta
+  if (desiredSamples < 1) desiredSamples <- 1
+  attr(measurePhWithRollingAverage2, "queue") <<- queue()
+  attr(measurePhWithRollingAverage2, "desiredSamples") <<- desiredSamples
+  attr(measurePhWithRollingAverage2, "total") <<- 0
+}
+
+
+
+
+
 test_measurePhWithRollingAverage <- function() {
   init_measurePhWithRollingAverage(1, 0.1)
   phs <- NULL
@@ -691,7 +737,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
 
   # Add acid
   if (time>10*60) {
-    tankContents <- doseAcidAtFixedRate(tankContents, 100, 1.5*60, timeDelta)
+    tankContents <- doseAcidAtFixedRate(tankContents, 1000, 5*60, timeDelta)
   }
   
   # Add makup water
@@ -710,7 +756,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
     #pumpPercentage <- proportionalPumpControl(previousPh, phSetpoint, p=3)
     pumpPercentage <- proportionalPumpControl(10^(8-previousPh),
                                               10^(8-phSetpoint),
-                                              p=100, FALSE)
+                                              p=1000, FALSE)
     #recircContents <- pumpCausticSolution(recircContents, pumpPercentage, maxPumpRate, timeDelta)
     recircContents <- pumpCausticSolutionWithRollingAverage(recircContents, pumpPercentage, maxPumpRate, timeDelta)
   }
@@ -721,6 +767,8 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   # Measure the pH in the recirc line
   recircContents <- chemicalReaction(recircContents)
   phRecirc <- measurePhWithRollingAverage(recircContents)
+  phRecirc2 <- measurePhWithRollingAverage2(recircContents)
+  
   linearPhRecirc <- linearisePh(phRecirc)
   names(phRecirc) <- "ph.recirc"
   names(linearPhRecirc) <- "linear_ph.recirc"
@@ -739,7 +787,7 @@ update <- function(tankContents, recircRate, time, timeDelta) {
   phTank <- measurePh(tankContents)
   names(phTank) <- "ph.tank"
 
-  return(list(tankContents=tankContents, data=c(setpoint=phSetpoint, phRecirc, linearPhRecirc, phTank, pumpPercentage)))
+  return(list(tankContents=tankContents, data=c(setpoint=phSetpoint, phRecirc, ph.recirc2=phRecirc2, linearPhRecirc, phTank, pumpPercentage)))
 }
 
 init_update <- function(tankContents) {
@@ -764,7 +812,8 @@ run <- function(tankContents, recircRate, duration, timeDelta=0.2) {
   init_makeupWater(christchurchWater)
   init_conditionalBleed(6, 10, 30)
   init_doseAcidAtFixedRate()
-  init_measurePhWithRollingAverage(100, timeDelta)
+  init_measurePhWithRollingAverage(100, timeDelta) # used for proportional control
+  init_measurePhWithRollingAverage2(10, timeDelta) # used for fair comparison
   init_pumpCausticSolutionWithRollingAverage(1, timeDelta)
   time <- 0
   results <- NULL
@@ -802,5 +851,35 @@ plot(results$time/60, results$nacl/(results$water*1000)*100, type="l",
      main="Proportion of Salt", xlab="Time (mins)", ylab="Salt percentage by weight (%)")
 
 
+# Save two set of results as results.10s and results.100s
+if (FALSE) { # don't run this normally
+  par(mfrow = c(2,1))
+  plot(results.100s$time/60, results.100s$ph.recirc2, 
+       type="l", col="red", lwd=2,
+       ylim=c(0,14),
+       main="pH Measurement in Recirculation Line\nwith H+ Control Loop",
+       ylab="pH",
+       xlab="time (mins)")
+  lines(results.100s$time/60, results.100s$ph.recirc)
+  abline(h=6, col="grey")
+  abline(h=10, col="grey")
+  legend("bottomright",c("10s probe with 100s control (passive)","100s probe with 100s control"),
+         col=c("red","black"),
+         lwd=c(2,1))
+  
+  plot(results.100s$time/60, results.100s$ph.recirc2, 
+       type="l", col="red", lwd=2,
+       ylim=c(0,14),
+       main="pH Measurement in Recirculation Line\nwith H+ Control Loop",
+       ylab="pH",
+       xlab="time (mins)")
+  lines(results.10s$time/60, results.10s$ph.recirc)
+  abline(h=6, col="grey")
+  abline(h=10, col="grey")
+  legend("bottomright",c("10s probe with 100s control (passive)","10s probe with 10s control"),
+         col=c("red","black"),
+         lwd=c(2,1))
+  par(mfrow=c(1,1))
+}
 #plot(results$time/60, results$linear_ph.recirc, type="l")
 
